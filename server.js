@@ -3,6 +3,7 @@ const app = express();
 
 const { WORDS: FALLBACK_WORDS, VALID_GUESSES: FALLBACK_GUESSES } = require('./words');
 const spotify = require('./spotify');
+const twitch  = require('./twitch');
 
 // In-memory game state: one active game per channel
 const games = {};
@@ -232,6 +233,9 @@ app.get('/api/sr', async (req, res) => {
   }
 
   try {
+    const live = await twitch.isLive(channel(req));
+    if (!live) return res.send(`@${user} Song requests are only available while the stream is live!`);
+
     const track = await spotify.searchTrack(query);
     if (!track) return res.send(`@${user} No results found for "${query}".`);
 
