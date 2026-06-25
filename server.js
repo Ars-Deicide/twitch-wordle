@@ -5,6 +5,20 @@ const { WORDS: FALLBACK_WORDS, VALID_GUESSES: FALLBACK_GUESSES } = require('./wo
 const spotify = require('./spotify');
 const twitch  = require('./twitch');
 
+// Middleware — rejects any request missing the correct API key.
+// Skips the OAuth routes so the one-time Spotify setup still works.
+function requireKey(req, res, next) {
+  const secret = process.env.API_SECRET;
+  if (!secret) return next(); // not configured — open access (dev mode)
+  if (req.query.key === secret) return next();
+  res.status(403).type('text/plain').send('Unauthorized');
+}
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next(); // skip OAuth routes
+  requireKey(req, res, next);
+});
+
 // In-memory game state: one active game per channel
 const games = {};
 
