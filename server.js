@@ -1,29 +1,69 @@
 const express = require('express');
 const app = express();
 
-const { WORDS, VALID_GUESSES } = require('./words');
+const { WORDS: FALLBACK_WORDS, VALID_GUESSES: FALLBACK_GUESSES } = require('./words');
 
 // In-memory game state: one active game per channel
 const games = {};
 
-const ALL_VALID = new Set([...WORDS, ...VALID_GUESSES]);
+// Word lists — populated at startup, then never change
+let ANSWER_WORDS = [];   // words that can be the answer
+let ALL_VALID    = new Set(); // all acceptable guesses
+
+// Fetch the complete 5-letter word lists from public sources at startup.
+// Falls back to the bundled lists if the network is unavailable.
+async function loadWords() {
+  try {
+    // tabatkins/wordle-list — the actual original Wordle answer + guess lists
+    const [answersRes, guessesRes] = await Promise.all([
+      fetch('https://raw.githubusercontent.com/tabatkins/wordle-list/main/words'),
+      fetch('https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt'),
+    ]);
+
+    if (!answersRes.ok || !guessesRes.ok) throw new Error('bad status');
+
+    const answersText = await answersRes.text();
+    const guessesText = await guessesRes.text();
+
+    // tabatkins list: one word per line, already 5 letters
+    ANSWER_WORDS = answersText
+      .split('\n')
+      .map(w => w.trim().toUpperCase())
+      .filter(w => /^[A-Z]{5}$/.test(w));
+
+    // dwyl list: one word per line, all lengths — filter to exactly 5 letters
+    const allEnglish = guessesText
+      .split('\n')
+      .map(w => w.trim().toUpperCase())
+      .filter(w => /^[A-Z]{5}$/.test(w));
+
+    ALL_VALID = new Set([...ANSWER_WORDS, ...allEnglish]);
+
+    console.log(`Loaded ${ANSWER_WORDS.length} answer words, ${ALL_VALID.size} valid guesses from network.`);
+  } catch (err) {
+    console.warn('Could not fetch word lists, using bundled fallback:', err.message);
+    ANSWER_WORDS = FALLBACK_WORDS;
+    ALL_VALID    = new Set([...FALLBACK_WORDS, ...FALLBACK_GUESSES]);
+    console.log(`Fallback: ${ANSWER_WORDS.length} answer words, ${ALL_VALID.size} valid guesses.`);
+  }
+}
 
 function randomWord() {
-  return WORDS[Math.floor(Math.random() * WORDS.length)];
+  return ANSWER_WORDS[Math.floor(Math.random() * ANSWER_WORDS.length)];
 }
 
 // Returns a 5-char string of 🟩🟨⬛
 function evaluate(guess, answer) {
-  const result = Array(5).fill('⬛');
+  const result     = Array(5).fill('⬛');
   const answerLeft = answer.split('');
   const guessLeft  = guess.split('');
 
   // Green pass
   for (let i = 0; i < 5; i++) {
     if (guessLeft[i] === answerLeft[i]) {
-      result[i]      = '🟩';
-      answerLeft[i]  = null;
-      guessLeft[i]   = null;
+      result[i]     = '🟩';
+      answerLeft[i] = null;
+      guessLeft[i]  = null;
     }
   }
 
@@ -32,7 +72,7 @@ function evaluate(guess, answer) {
     if (!guessLeft[i]) continue;
     const j = answerLeft.indexOf(guessLeft[i]);
     if (j !== -1) {
-      result[i]  = '🟨';
+      result[i]     = '🟨';
       answerLeft[j] = null;
     }
   }
@@ -47,11 +87,7 @@ function channel(req) {
 // GET /api/start  — start (or restart) a game; intended for mods
 app.get('/api/start', (req, res) => {
   const ch = channel(req);
-  games[ch] = {
-    word:    randomWord(),
-    guesses: [],
-    over:    false,
-  };
+  games[ch] = { word: randomWord(), guesses: [], over: false };
   res.type('text/plain').send(
     '🟩🟨⬛ A new Wordle game has started! ' +
     'Use !guess <5-letter-word> to play. You have 6 attempts. Good luck! 🍀'
@@ -68,14 +104,12 @@ app.get('/api/status', (req, res) => {
     return res.send('No active Wordle game. A mod can type !wordle to start one!');
   }
   if (game.guesses.length === 0) {
-    return res.send(
-      `Wordle is live! ⬛⬛⬛⬛⬛ — Make your first guess with !guess <word>. 6 attempts remaining.`
-    );
+    return res.send('Wordle is live! ⬛⬛⬛⬛⬛ — Make your first guess with !guess <word>. 6 attempts remaining.');
   }
 
-  const board = game.guesses.map((g, i) => `${i + 1}: ${g.result} ${g.guess}`).join(' | ');
+  const board     = game.guesses.map((g, i) => `${i + 1}: ${g.result} ${g.guess}`).join(' | ');
   const remaining = 6 - game.guesses.length;
-  const suffix = game.over ? ' [GAME OVER]' : ` | ${remaining} left`;
+  const suffix    = game.over ? ' [GAME OVER]' : ` | ${remaining} left`;
   res.send(`Wordle (${game.guesses.length}/6): ${board}${suffix}`);
 });
 
@@ -98,7 +132,7 @@ app.get('/api/guess', (req, res) => {
     return res.send(`@${user} Please guess exactly 5 letters (e.g. !guess crane).`);
   }
   if (!ALL_VALID.has(guess)) {
-    return res.send(`@${user} "${guess}" is not in the word list — try a different word!`);
+    return res.send(`@${user} "${guess}" is not a valid English word — try again!`);
   }
 
   const result  = evaluate(guess, game.word);
@@ -112,7 +146,7 @@ app.get('/api/guess', (req, res) => {
 
   if (won) {
     game.over = true;
-    const praise = ['Genius! 🧠','Magnificent! ✨','Impressive! 🔥','Splendid! 🎊','Great! 🎉','Phew! 😅'];
+    const praise = ['Genius! 🧠', 'Magnificent! ✨', 'Impressive! 🔥', 'Splendid! 🎊', 'Great! 🎉', 'Phew! 😅'];
     msg += ` ${praise[guessNo - 1] || '🎉'} Solved in ${guessNo}! Type !wordle for a new game.`;
   } else if (lost) {
     game.over = true;
@@ -124,7 +158,7 @@ app.get('/api/guess', (req, res) => {
   res.send(msg);
 });
 
-// GET /api/board  — compact multi-line board (useful for checking state mid-game)
+// GET /api/board  — compact board state
 app.get('/api/board', (req, res) => {
   const ch   = channel(req);
   const game = games[ch];
@@ -134,18 +168,15 @@ app.get('/api/board', (req, res) => {
     return res.send('No guesses yet. Use !guess <word> to start!');
   }
 
-  const rows = game.guesses.map((g, i) => `${g.result} ${g.guess}`);
-  // Fill remaining rows with empties
+  const rows = game.guesses.map(g => `${g.result} ${g.guess}`);
   while (rows.length < 6) rows.push('⬛⬛⬛⬛⬛');
   res.send(rows.join(' | '));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Twitch Wordle API listening on port ${PORT}`);
-  console.log('Endpoints:');
-  console.log('  GET /api/start?channel=<channel>');
-  console.log('  GET /api/guess?channel=<channel>&user=<user>&guess=<word>');
-  console.log('  GET /api/status?channel=<channel>');
-  console.log('  GET /api/board?channel=<channel>');
+
+loadWords().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Twitch Wordle API listening on port ${PORT}`);
+  });
 });
