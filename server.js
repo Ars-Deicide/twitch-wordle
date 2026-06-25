@@ -2,6 +2,7 @@ const express = require('express');
 const app = express();
 
 const { WORDS: FALLBACK_WORDS, VALID_GUESSES: FALLBACK_GUESSES } = require('./words');
+const spotify = require('./spotify');
 
 // In-memory game state: one active game per channel
 const games = {};
@@ -172,6 +173,94 @@ app.get('/api/board', (req, res) => {
   while (rows.length < 6) rows.push('⬛⬛⬛⬛⬛');
   res.send(rows.join(' | '));
 });
+
+// ── Spotify OAuth (one-time setup) ──────────────────────────────────────────
+
+// Step 1: visit /auth/spotify in your browser to kick off the OAuth flow
+app.get('/auth/spotify', (req, res) => {
+  const params = new URLSearchParams({
+    client_id:     process.env.SPOTIFY_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri:  process.env.SPOTIFY_REDIRECT_URI,
+    scope:         'user-modify-playback-state user-read-currently-playing user-read-playback-state',
+  });
+  res.redirect(`https://accounts.spotify.com/authorize?${params}`);
+});
+
+// Step 2: Spotify redirects here — displays your refresh token
+app.get('/auth/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error) return res.type('text/plain').send(`Spotify auth error: ${error}`);
+
+  const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type':  'application/x-www-form-urlencoded',
+      'Authorization': 'Basic ' + Buffer.from(
+        `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+      ).toString('base64'),
+    },
+    body: new URLSearchParams({
+      grant_type:   'authorization_code',
+      code,
+      redirect_uri: process.env.SPOTIFY_REDIRECT_URI,
+    }),
+  });
+
+  const data = await tokenRes.json();
+  res.type('text/plain').send(
+    `✅ Authorization successful!\n\n` +
+    `Add this to your Railway environment variables:\n\n` +
+    `SPOTIFY_REFRESH_TOKEN=${data.refresh_token}\n\n` +
+    `Then redeploy the server.`
+  );
+});
+
+// ── Spotify song request endpoints ───────────────────────────────────────────
+
+// GET /api/sr?channel=…&user=…&q=…  — request a song
+app.get('/api/sr', async (req, res) => {
+  const user  = req.query.user || 'Anonymous';
+  const query = (req.query.q || '').trim();
+  res.type('text/plain');
+
+  if (!process.env.SPOTIFY_REFRESH_TOKEN) {
+    return res.send(`@${user} Song requests are not set up yet.`);
+  }
+  if (!query) {
+    return res.send(`@${user} Usage: !sr <song name or artist>`);
+  }
+
+  try {
+    const track = await spotify.searchTrack(query);
+    if (!track) return res.send(`@${user} No results found for "${query}".`);
+
+    await spotify.addToQueue(track.uri);
+    res.send(`@${user} ✅ Added to queue: "${track.name}" by ${track.artist}`);
+  } catch (err) {
+    res.send(`@${user} ❌ ${err.message}`);
+  }
+});
+
+// GET /api/song?channel=…  — show currently playing track
+app.get('/api/song', async (req, res) => {
+  res.type('text/plain');
+
+  if (!process.env.SPOTIFY_REFRESH_TOKEN) {
+    return res.send('Song requests are not set up yet.');
+  }
+
+  try {
+    const track = await spotify.getCurrentlyPlaying();
+    if (!track) return res.send('Nothing is playing on Spotify right now.');
+    const status = track.isPlaying ? '🎵 Now playing' : '⏸ Paused';
+    res.send(`${status}: "${track.name}" by ${track.artist}`);
+  } catch (err) {
+    res.send(`Could not fetch current song: ${err.message}`);
+  }
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 
